@@ -72,6 +72,15 @@ blueos_dso("libc") {
   ]
 }
 
+# C21 §10.1: the ARM32 Thumb dynamic-application start object. It is ARM
+# assembly, so it is only ever *linked* into dynamic apps on ARM boards (C29);
+# GN only builds it when a dynamic-app target references it, which no non-ARM
+# board does. C29 links it at the front of the dynamic app so `_start` is its
+# `e_entry`.
+static_library("blueos_scrt1") {
+  sources = [ "start/arm/blueos_scrt1.S" ]
+}
+
 build_rust("librs_unittest_image") {
   testonly = true
   crate_type = "bin"

@@ -65,8 +65,16 @@ pub mod tls;
 pub mod types;
 pub mod unistd;
 
+/// Static (non-dynamic) application entry, preserved for the `kernel/rsrt`
+/// static `std` path and existing static apps (C21, §10.2). The dynamic DSO
+/// entry is [`__librs_start_main`] with a `(main, info)` signature.
+///
+/// Compiled out of the shared libc: it calls the application's `main` symbol
+/// directly, which a DSO must not reference (the dynamic entry receives `main`
+/// as a parameter instead).
+#[cfg(not(librs_dso))]
 #[no_mangle]
-pub extern "C" fn __librs_start_main() {
+pub extern "C" fn __librs_start_main_static() {
     crate::stdio::init();
     crate::pthread::register_my_posix_tcb();
     // TODO: Pass argc, argv and envp?
@@ -77,6 +85,26 @@ pub extern "C" fn __librs_start_main() {
     unsafe {
         main();
     }
+}
+
+/// Dynamic application entry exported by `libc.so.1` (C21, §10.2).
+///
+/// `blueos_scrt1::_start` tail-calls this with the application's `main` and the
+/// pinned `ApplicationStartInfo *`. C28 (§17.2) grows the body into the full
+/// validate → init plan → `ApplicationInitComplete` → `main(argc, argv, envp)`
+/// → `ApplicationBeginExit` → atexit/fini → `ApplicationFinishExit` +
+/// `ExitThread` sequence. The Phase-1 placeholder runs `main` directly and
+/// parks; it never returns.
+#[no_mangle]
+pub extern "C" fn __librs_start_main(
+    main: extern "C" fn() -> i32,
+    _info: *const blueos_header::application::BlueOsApplicationStartInfo,
+) -> ! {
+    crate::stdio::init();
+    crate::pthread::register_my_posix_tcb();
+    // TODO(C28, §17.2): the full init/main/exit sequence above.
+    main();
+    loop {}
 }
 
 // FIXME: Remove this when we have a proper libc implementation.

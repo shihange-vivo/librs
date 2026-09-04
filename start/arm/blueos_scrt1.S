@@ -31,14 +31,33 @@
 _start:
     // r0 = info (BlueOsApplicationStartInfo *).
     mov     r1, r0                  // __librs_start_main(main, info): r1 = info
-    ldr     r0, .Lmain_got          // r0 = address of the GOT slot for `main`
-    ldr     r0, [r0]                // r0 = application main (via GOT/RELATIVE)
-    b       __librs_start_main      // tail-call; never returns
-
+    // r0 = the application's `main`, which is defined in this image: the
+    // PC-relative `adr` is resolved by the static linker and emits no dynamic
+    // relocation at all. A literal `main(GOT)` reference instead relies on
+    // the linker resolving the GOT-slot address into the pool word, which
+    // LLD currently leaves zero — so the indirection is avoided entirely.
+    adr     r0, main
+    // Tail-call `__librs_start_main` (an undefined symbol, provided by
+    // libc.so.1) through its GOT slot: a plain `b` makes LLD emit a
+    // __ThumbV7PILongThunk whose `bx r12` carries an even address for the
+    // Thumb PLT (an interworking violation on Cortex-M), so the GOT
+    // indirection is spelled out here instead. The GOT slot is resolved by
+    // an R_ARM_GLOB_DAT dynamic relocation at load time.
+    //
+    // The `ldr.w`/`add pc` pairing is the ABI's GOT_PREL idiom: the linker
+    // encodes the slot address as `slot - (address of the pool word)`, and
+    // the 16-bit `add r12, pc` reads PC as Align(addr+4, 4) — so the pool
+    // word must sit exactly four bytes after the `add`. A 16-bit branch fills
+    // the two bytes in between and skips over the literal; without that branch
+    // the CPU would execute the GOT_PREL word as two Thumb instructions before
+    // reaching the indirect call. The whole block must be 4-byte aligned.
     .align  2
-.Lmain_got:
-    // A PIE reference to `main` must go through the GOT: a literal `ldr =main`
-    // would emit R_ARM_ABS32, which the dynamic-app contract forbids. The
-    // linker resolves this slot with an R_ARM_RELATIVE dynamic relocation.
-    .word   main(GOT)
+    ldr.w   r12, .Lgot_slot
+    add     r12, pc
+    b       .Lcall
+.Lgot_slot:
+    .word   __librs_start_main(GOT_PREL)
+.Lcall:
+    ldr.w   r12, [r12]
+    bx      r12
     .size   _start, .-_start

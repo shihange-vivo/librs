@@ -338,6 +338,39 @@ pub fn get_my_context() -> Option<Arc<LibcApplicationContext>> {
     get_my_tcb().and_then(|tcb| tcb.context.clone())
 }
 
+/// Run the calling thread's pthread-key destructors (which includes the emutls
+/// key destructor) and remove its TCB, without the joinable/detached bookkeeping
+/// or the terminal `ExitThread`. Used by the dynamic entry's main-thread teardown
+/// (§17.2 step 10), which performs `ApplicationFinishExit` + `ExitThread` itself.
+/// cbindgen:ignore
+pub fn cleanup_my_tcb() {
+    let tid = pthread_self();
+    let Some(tcb) = get_tcb(tid) else {
+        return;
+    };
+    {
+        let read_tcb_kv = tcb.kv.read();
+        // Collect dtors and vals first: a dtor may write KEYS while we iterate.
+        let mut dtors = Vec::new();
+        let mut vals = Vec::new();
+        for (key, val) in read_tcb_kv.iter() {
+            let keys = KEYS.read();
+            if let Some(dtor) = keys.get(key) {
+                let ptr: *mut c_void = *val as *mut c_void;
+                if let Some(f) = dtor.0.as_ref() {
+                    dtors.push(*f);
+                    vals.push((*key, ptr));
+                }
+            }
+        }
+        drop(read_tcb_kv);
+        for i in 0..dtors.len() {
+            dtors[i](vals[i].1);
+        }
+    }
+    remove_tcb(tid);
+}
+
 extern "C" fn register_posix_tcb(tid: usize, _spawn_args_ptr: *mut SpawnArgs) {
     // Inherit the creating thread's application context (C28, §17.1). The
     // `spawn_hook` runs synchronously in the creator's context (the kernel

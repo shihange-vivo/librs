@@ -36,6 +36,13 @@ extern crate alloc;
 #[cfg(test)]
 extern crate rsrt;
 
+use crate::application_context::LibcApplicationContext;
+use blueos_header::syscalls::NR::{
+    ApplicationBeginExit, ApplicationFinishExit, ApplicationInitComplete,
+};
+use blueos_scal::bk_syscall;
+use core::ffi::{c_char, c_int};
+
 // We don't expose any interfaces or types externally, rust-lang/libc is doing that.
 pub mod application_context;
 pub mod c_str;
@@ -94,18 +101,135 @@ pub extern "C" fn __librs_start_main_static() {
 /// pinned `ApplicationStartInfo *`. C28 (§17.2) grows the body into the full
 /// validate → init plan → `ApplicationInitComplete` → `main(argc, argv, envp)`
 /// → `ApplicationBeginExit` → atexit/fini → `ApplicationFinishExit` +
-/// `ExitThread` sequence. The Phase-1 placeholder runs `main` directly and
-/// parks; it never returns.
+/// `ExitThread` sequence; it never returns.
 #[no_mangle]
 pub extern "C" fn __librs_start_main(
-    main: extern "C" fn() -> i32,
-    _info: *const blueos_header::application::BlueOsApplicationStartInfo,
+    main: extern "C" fn(argc: c_int, argv: *const *const c_char, envp: *const *const c_char)
+        -> c_int,
+    info: *const blueos_header::application::BlueOsApplicationStartInfo,
 ) -> ! {
+    // Step 1 (§17.2): validate the versioned prefix and every nested count/pointer.
+    let info = match validate_start_info(info) {
+        Some(info) => info,
+        None => park(),
+    };
+
     crate::stdio::init();
-    crate::pthread::register_my_posix_tcb();
-    // TODO(C28, §17.2): the full init/main/exit sequence above.
-    main();
-    loop {}
+
+    // Step 2: register the main TCB and install the application context before
+    // any constructor runs (a ctor may call `getauxval`/`atexit`/`pthread_create`).
+    let context = match LibcApplicationContext::new(info) {
+        Some(context) => context,
+        None => park(),
+    };
+    crate::pthread::register_my_posix_tcb_with_context(context.clone());
+
+    // Step 4: run the init plan in storage order (§17.2). The plan was validated
+    // above; executing it is the one audited librs boundary that turns the
+    // loader's `usize` targets back into function pointers (design §4.13).
+    run_plan(&info.init_plan);
+
+    // Step 5: signal init completion. The server derives membership from the
+    // current thread and validates the generation (§16.2); the passed handle is
+    // advisory and ignored for authorisation.
+    let _ = bk_syscall!(ApplicationInitComplete, info.handle.slot as usize);
+
+    // Step 6: invoke the application.
+    let status = main(
+        info.argc as c_int,
+        info.argv,
+        info.envp,
+    );
+
+    // Step 7: forbid new threads and wait for the other members (§16.2).
+    let _ = bk_syscall!(ApplicationBeginExit, status);
+
+    // Step 8: application-owned atexit, reverse registration order.
+    context.run_atexit();
+
+    // Step 9: fini plan is already stored reverse-order; walk storage order.
+    run_plan(&info.fini_plan);
+
+    // Step 10: main-thread pthread-key/emutls destructors, then drop the TCB.
+    crate::pthread::cleanup_my_tcb();
+
+    // Step 11: finish the two-phase exit and retire. `finish_exit` never returns
+    // (it performs `retire_me`), which subsumes the trailing `ExitThread`.
+    let _ = bk_syscall!(ApplicationFinishExit);
+    park()
+}
+
+/// Validate the start-info block and return a shared reference to it, or `None`
+/// when the version, prefix size, or a nested count/pointer pair is inconsistent
+/// (§9.1, §17.2). A `None` result is a fatal setup error: the entry parks.
+fn validate_start_info(
+    info: *const blueos_header::application::BlueOsApplicationStartInfo,
+) -> Option<&'static blueos_header::application::BlueOsApplicationStartInfo> {
+    use blueos_header::application::APPLICATION_START_INFO_ABI_VERSION;
+
+    if info.is_null() {
+        return None;
+    }
+    // SAFETY: `info` is the kernel-pinned start block handed to `_start`; the
+    // null check above and the count/pointer checks below bound every read.
+    let info = unsafe { &*info };
+    if info.abi_version != APPLICATION_START_INFO_ABI_VERSION {
+        return None;
+    }
+    if info.struct_size < core::mem::size_of_val(info) as u32 {
+        return None;
+    }
+    // argv/envp are C `char **` arrays of the given length; a non-zero count
+    // must be backed by a non-null pointer array (§15.3).
+    if (info.argc != 0) != !info.argv.is_null() || (info.envc != 0) != !info.envp.is_null() {
+        return None;
+    }
+    // auxv and both plans must be self-consistent too.
+    if (info.auxv_count != 0) != !info.auxv.is_null()
+        || !plan_valid(&info.init_plan)
+        || !plan_valid(&info.fini_plan)
+    {
+        return None;
+    }
+    Some(info)
+}
+
+/// Validate a constructor/destructor plan's versioned prefix (§9.1, §17.2).
+fn plan_valid(plan: &blueos_header::application::BlueOsFunctionPlan) -> bool {
+    use blueos_header::application::FUNCTION_PLAN_ABI_VERSION;
+    if plan.abi_version != FUNCTION_PLAN_ABI_VERSION {
+        return false;
+    }
+    if plan.struct_size < core::mem::size_of_val(plan) as u32 {
+        return false;
+    }
+    (plan.count != 0) == !plan.entries.is_null()
+}
+
+/// Walk a validated plan in storage order, invoking each entry (§17.2 steps 4
+/// and 9). This is the audited librs boundary that re-materialises the loader's
+/// `usize` targets as function pointers (design §4.13); the Thumb bit is part of
+/// the stored address and is preserved by the `transmute`.
+fn run_plan(plan: &blueos_header::application::BlueOsFunctionPlan) {
+    for i in 0..plan.count {
+        // SAFETY: `entries` is the kernel-pinned target array; `i < count` and
+        // `plan_valid` confirmed the pointer/version/prefix. The target address
+        // was installed by the loader with a live allocation lease (§15.3).
+        let target = unsafe { *plan.entries.add(i) };
+        // SAFETY: the loader only emits canonical, executable Thumb entry
+        // addresses here (design §4.13).
+        let function: extern "C" fn() = unsafe { core::mem::transmute(target) };
+        function();
+    }
+}
+
+/// Terminal landing pad: park the core. Used on unrecoverable setup errors and
+/// as the trailing `-> !` of the entry; `ApplicationFinishExit` retires before
+/// this is ever reached on the normal path.
+fn park() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 // FIXME: Remove this when we have a proper libc implementation.

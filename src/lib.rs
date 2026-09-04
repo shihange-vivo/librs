@@ -39,6 +39,8 @@ extern crate rsrt;
 // We don't expose any interfaces or types externally, rust-lang/libc is doing that.
 pub mod c_str;
 pub mod ctype;
+#[cfg(librs_dso)]
+mod dso_rt;
 pub mod direct;
 pub mod errno;
 pub mod fcntl;

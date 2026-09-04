@@ -14,6 +14,7 @@
 
 import("//build/boards/${board}.gni")
 import("//build/templates/build_template.gni")
+import("//build/templates/blueos_dso.gni")
 import("//build/toolchain/blueos.gni")
 
 build_rust("librs") {
@@ -51,6 +52,24 @@ build_rust("librs_swi") {
 
 run_clippy("librs_swi_clippy") {
   deps = [ ":librs_swi" ]
+}
+
+# C19 §8: the system shared libc. Built from the same `librs` sources as a PIC
+# cdylib, linked through the SWI syscall ABI (`blueos_scal_swi`, not
+# `direct_syscall_handler`), with SONAME `libc.so.1`. It must not resolve or
+# reference any kernel Rust/C symbol; every undefined symbol comes from the PIC
+# sysroot or the scal SWI shim (checked by `check_blueos_elf.py`).
+blueos_dso("libc") {
+  crate_name = "librs"
+  soname = "libc.so.1"
+  sources = [ "src/lib.rs" ]
+  cfgs = [ "librs_dso" ]
+  deps = [
+    "//external/vendor/spin-0.9.8:spin",
+    "//kernel/header:blueos_header",
+    "//kernel/scal:blueos_scal_swi",
+    "//libc",
+  ]
 }
 
 build_rust("librs_unittest_image") {

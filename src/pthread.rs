@@ -34,6 +34,8 @@ use blueos_header::{
     thread::{SpawnArgs, DEFAULT_STACK_SIZE, STACK_ALIGN},
 };
 use blueos_scal::bk_syscall;
+
+use crate::application_context::LibcApplicationContext;
 use core::{
     alloc::Layout,
     cell::SyncUnsafeCell,
@@ -89,6 +91,10 @@ struct PthreadTcb {
     cancel_enabled: AtomicBool,
     retval: SyncUnsafeCell<usize>,
     joint: Barrier,
+    // The owning application's runtime context (C28, §17.1). Inherited by
+    // every pthread created from this thread; `None` for threads that predate
+    // the dynamic entry (the static path has no application context).
+    context: Option<Arc<LibcApplicationContext>>,
 }
 
 #[inline]
@@ -315,7 +321,36 @@ pub extern "C" fn register_my_posix_tcb() {
     register_posix_tcb(tid as usize, core::ptr::null_mut());
 }
 
+/// Register the calling thread's TCB and attach an application runtime context
+/// (C28, §17.1). Used by the dynamic entry to install the main thread's
+/// [`LibcApplicationContext`] before any constructor runs.
+/// cbindgen:ignore
+pub fn register_my_posix_tcb_with_context(context: Arc<LibcApplicationContext>) {
+    let tid = pthread_self();
+    register_posix_tcb_with_context(tid as usize, Some(context));
+}
+
+/// The calling thread's application runtime context (C28, §17.3), if any.
+/// `None` for threads that predate the dynamic entry (the static path has no
+/// application context).
+#[inline]
+pub fn get_my_context() -> Option<Arc<LibcApplicationContext>> {
+    get_my_tcb().and_then(|tcb| tcb.context.clone())
+}
+
 extern "C" fn register_posix_tcb(tid: usize, _spawn_args_ptr: *mut SpawnArgs) {
+    // Inherit the creating thread's application context (C28, §17.1). The
+    // `spawn_hook` runs synchronously in the creator's context (the kernel
+    // calls it inline inside `create_thread` before the new thread is queued),
+    // so `pthread_self()` still names the creator here.
+    let context = get_my_context();
+    register_posix_tcb_with_context(tid as usize, context);
+}
+
+fn register_posix_tcb_with_context(
+    tid: usize,
+    context: Option<Arc<LibcApplicationContext>>,
+) {
     let tid: pthread_t = unsafe { core::mem::transmute(tid) };
     {
         let tcb = Arc::new(PthreadTcb {
@@ -324,6 +359,7 @@ extern "C" fn register_posix_tcb(tid: usize, _spawn_args_ptr: *mut SpawnArgs) {
             detached: AtomicI8::new(0),
             retval: SyncUnsafeCell::new(0),
             joint: Barrier::new(unsafe { NonZero::new(2).unwrap_unchecked() }),
+            context,
         });
         let mut write = TCBS.write();
         let ret = write.insert(tid, tcb);

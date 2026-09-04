@@ -95,6 +95,50 @@ impl LibcApplicationContext {
             .map_or(0, |entry| entry.value)
     }
 
+    /// The `auxv` entries owned by this context, in kernel order (§15.3).
+    #[inline]
+    pub fn auxv_entries(&self) -> &[BlueOsAuxvEntry] {
+        &self.auxv
+    }
+
+    /// `getauxval` with the current thread's context; on a miss or when the
+    /// thread has no application context, returns `0` and sets `errno` to
+    /// `ENOENT` per the POSIX convention (§17.3).
+    #[inline]
+    pub fn get_or_errno(key: usize) -> usize {
+        match Self::get(key) {
+            Some(value) => value,
+            None => {
+                crate::errno::ERRNO.set(libc::ENOENT);
+                0
+            }
+        }
+    }
+
+    /// `getauxval` against the current thread's context without touching
+    /// `errno`. Returns `None` when the key is absent *or* the calling thread
+    /// has no application context (static path threads).
+    #[inline]
+    pub fn get(key: usize) -> Option<usize> {
+        crate::pthread::get_my_context()
+            .map(|context| context.getauxval(key))
+    }
+
+    /// `atexit` against the current thread's application context (§17.2 step 8).
+    /// Returns `0` on success, `ENOMEM` when the registration cannot reserve
+    /// space, and `ENOENT` when the thread has no application context.
+    #[inline]
+    pub fn atexit(function: AtExitEntry) -> core::ffi::c_int {
+        let Some(context) = crate::pthread::get_my_context() else {
+            return libc::ENOENT;
+        };
+        if context.register_atexit(function) {
+            0
+        } else {
+            libc::ENOMEM
+        }
+    }
+
     /// Register an application-owned destructor (§17.2 step 8). Returns `false`
     /// on allocation failure; destructors run in reverse registration order.
     pub fn register_atexit(&self, function: AtExitEntry) -> bool {

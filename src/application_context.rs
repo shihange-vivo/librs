@@ -164,3 +164,20 @@ impl LibcApplicationContext {
         !self.exit_started.swap(true, Ordering::AcqRel)
     }
 }
+
+/// POSIX `getauxval(key)` against the current thread's application context
+/// (§17.3). Returns `0` (and sets `errno` to `ENOENT`) when the key is absent or
+/// the calling thread has no application context.
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn getauxval(key: core::ffi::c_ulong) -> core::ffi::c_ulong {
+    LibcApplicationContext::get_or_errno(key as usize) as core::ffi::c_ulong
+}
+
+/// POSIX `atexit(function)` against the current thread's application context
+/// (§17.2 step 8). Returns `0` on success, or a positive errno on failure.
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn atexit(function: AtExitEntry) -> core::ffi::c_int {
+    LibcApplicationContext::atexit(function)
+}

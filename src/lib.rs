@@ -180,13 +180,15 @@ fn validate_start_info(
     if info.struct_size < core::mem::size_of_val(info) as u32 {
         return None;
     }
-    // argv/envp are C `char **` arrays of the given length; a non-zero count
-    // must be backed by a non-null pointer array (§15.3).
-    if (info.argc != 0) != !info.argv.is_null() || (info.envc != 0) != !info.envp.is_null() {
+    // argv/envp are C `char **` arrays of the given length. A non-zero count
+    // must be backed by a non-null pointer array; a zero count needs no array
+    // (the kernel still emits a `[null]` terminator, so a non-null pointer with
+    // zero count is valid and simply unused) (§15.3).
+    if (info.argc > 0 && info.argv.is_null()) || (info.envc > 0 && info.envp.is_null()) {
         return None;
     }
     // auxv and both plans must be self-consistent too.
-    if (info.auxv_count != 0) != !info.auxv.is_null()
+    if (info.auxv_count > 0 && info.auxv.is_null())
         || !plan_valid(&info.init_plan)
         || !plan_valid(&info.fini_plan)
     {
@@ -195,7 +197,9 @@ fn validate_start_info(
     Some(info)
 }
 
-/// Validate a constructor/destructor plan's versioned prefix (§9.1, §17.2).
+/// Validate a constructor/destructor plan's versioned prefix (§9.1, §17.2). A
+/// non-empty plan must be backed by a non-null target array; an empty plan needs
+/// none (the array may still be present, so `count == 0` accepts either).
 fn plan_valid(plan: &blueos_header::application::BlueOsFunctionPlan) -> bool {
     use blueos_header::application::FUNCTION_PLAN_ABI_VERSION;
     if plan.abi_version != FUNCTION_PLAN_ABI_VERSION {
@@ -204,7 +208,7 @@ fn plan_valid(plan: &blueos_header::application::BlueOsFunctionPlan) -> bool {
     if plan.struct_size < core::mem::size_of_val(plan) as u32 {
         return false;
     }
-    (plan.count != 0) == !plan.entries.is_null()
+    plan.count == 0 || !plan.entries.is_null()
 }
 
 /// Walk a validated plan in storage order, invoking each entry (§17.2 steps 4

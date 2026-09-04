@@ -61,6 +61,7 @@ pub mod pthread;
 pub mod sched;
 pub mod semaphore;
 pub mod signal;
+pub mod spawn;
 pub mod stat;
 pub mod stdio;
 pub mod stdlib;

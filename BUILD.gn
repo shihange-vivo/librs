@@ -76,9 +76,11 @@ blueos_dso("libc") {
 # assembly, so it is only ever *linked* into dynamic apps on ARM boards (C29);
 # GN only builds it when a dynamic-app target references it, which no non-ARM
 # board does. C29 links it at the front of the dynamic app so `_start` is its
-# `e_entry`.
+# `e_entry`. The board `kernel_config` supplies the clang `--target`/Thumb
+# flags the assembler needs (`-mthumb -march=...`).
 static_library("blueos_scrt1") {
   sources = [ "start/arm/blueos_scrt1.S" ]
+  configs += [ "//build/boards/${board}:kernel_config" ]
 }
 
 build_rust("librs_unittest_image") {

@@ -15,7 +15,8 @@
 // blueos_scrt1.S — minimal ARM32 Thumb dynamic-application start object (C21, §10.1).
 //
 // `_start` is the dynamic application's ELF entry (`e_entry`, bit 0 set). The
-// kernel schedules it through `Thread::Entry::Posix`, which delivers the pinned
+// kernel schedules it through `Thread::Entry::Raw`, which installs the
+// relocated entry as the initial PC and delivers the pinned
 // `BlueOsApplicationStartInfo *` in r0. It re-packs the argument order for the
 // `libc.so.1` entry `__librs_start_main(main, info) -> !` and tail-calls it; the
 // application's `main` is resolved by the loader as the app's own symbol.
@@ -30,8 +31,14 @@
 _start:
     // r0 = info (BlueOsApplicationStartInfo *).
     mov     r1, r0                  // __librs_start_main(main, info): r1 = info
-    ldr     r0, =main               // r0 = application main (via GOT/RELATIVE)
+    ldr     r0, .Lmain_got          // r0 = address of the GOT slot for `main`
+    ldr     r0, [r0]                // r0 = application main (via GOT/RELATIVE)
     b       __librs_start_main      // tail-call; never returns
 
-    .ltorg
+    .align  2
+.Lmain_got:
+    // A PIE reference to `main` must go through the GOT: a literal `ldr =main`
+    // would emit R_ARM_ABS32, which the dynamic-app contract forbids. The
+    // linker resolves this slot with an R_ARM_RELATIVE dynamic relocation.
+    .word   main(GOT)
     .size   _start, .-_start

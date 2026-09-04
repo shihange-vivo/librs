@@ -59,6 +59,10 @@ run_clippy("librs_swi_clippy") {
 # `direct_syscall_handler`), with SONAME `libc.so.1`. It must not resolve or
 # reference any kernel Rust/C symbol; every undefined symbol comes from the PIC
 # sysroot or the scal SWI shim (checked by `check_blueos_elf.py`).
+#
+# C19 §8.2: `librs.exports` is the frozen export surface. The postlink freeze
+# localizes every dynsym entry outside the manifest and the contract gate
+# asserts the dynamic symbol table equals it exactly.
 blueos_dso("libc") {
   crate_name = "librs"
   soname = "libc.so.1"
@@ -70,6 +74,7 @@ blueos_dso("libc") {
     "//kernel/scal:blueos_scal_swi",
     "//libc",
   ]
+  export_manifest = "librs.exports"
 }
 
 # C21 §10.1: the ARM32 Thumb dynamic-application start object. It is ARM

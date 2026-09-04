@@ -1,0 +1,44 @@
+# librs.exports — the frozen Phase 1 export surface of libc.so.1 (C19, §8.2).
+#
+# This version script is the single source of truth for the shared libc's
+# dynamic symbol table: every listed symbol is exported, everything else is
+# made local at link time. No Rust-mangled name may ever appear here, and any
+# addition or removal must go through a separate ABI diff review.
+#
+# The first version covers the C29 vertical fixture's real usage plus the
+# Phase 1 smoke ABI categories (§8.2):
+#   - crt/runtime:   the dynamic entry, the pthread TCB hand-in and the
+#                    unwind landing pad for panic paths;
+#   - heap:          malloc/free/posix_memalign (calloc/realloc do not exist
+#                    in the librs ABI yet; add them when they are introduced);
+#   - IO smoke:      read/write/open/close/lseek;
+#   - fixture:       strlen/getauxval (imported by the hello PIE);
+#   - application:   spawn and atexit (C28, §17.6);
+#   - pthread core:  create/join/detach/self/exit plus the emutls runtime
+#                    entry the TLS ABI calls through.
+{
+    global:
+        __librs_start_main;
+        register_my_posix_tcb;
+        __aeabi_unwind_cpp_pr0;
+        malloc;
+        free;
+        posix_memalign;
+        read;
+        write;
+        open;
+        close;
+        lseek;
+        strlen;
+        getauxval;
+        spawn;
+        atexit;
+        pthread_create;
+        pthread_join;
+        pthread_detach;
+        pthread_self;
+        pthread_exit;
+        __emutls_get_address;
+    local:
+        *;
+};

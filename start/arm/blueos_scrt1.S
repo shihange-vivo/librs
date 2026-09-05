@@ -31,12 +31,21 @@
 _start:
     // r0 = info (BlueOsApplicationStartInfo *).
     mov     r1, r0                  // __librs_start_main(main, info): r1 = info
-    // r0 = the application's `main`, which is defined in this image: the
-    // PC-relative `adr` is resolved by the static linker and emits no dynamic
-    // relocation at all. A literal `main(GOT)` reference instead relies on
-    // the linker resolving the GOT-slot address into the pool word, which
-    // LLD currently leaves zero — so the indirection is avoided entirely.
-    adr     r0, main
+    // r0 = the application's `main`, which is defined in this image. A
+    // 16-bit `adr` cannot reach `main` in larger apps (±4 KiB), LLD rejects
+    // the wide form's relocation, and LLD refuses R_ARM_ABS32/R_ARM_RELATIVE
+    // data references to a function in a PIE — so `main` goes through its GOT
+    // slot with the same GOT_PREL idiom as `__librs_start_main` below: the
+    // pool word resolves to the slot's address statically, and the slot
+    // itself is filled by an R_ARM_GLOB_DAT dynamic relocation at load time.
+    .align  2
+    ldr.w   r0, .Lmain_got
+    add     r0, pc
+    b       .Lmain_load
+.Lmain_got:
+    .word   main(GOT_PREL)
+.Lmain_load:
+    ldr.w   r0, [r0]
     // Tail-call `__librs_start_main` (an undefined symbol, provided by
     // libc.so.1) through its GOT slot: a plain `b` makes LLD emit a
     // __ThumbV7PILongThunk whose `bx r12` carries an even address for the

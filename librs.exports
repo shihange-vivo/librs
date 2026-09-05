@@ -16,6 +16,14 @@
 #   - application:   spawn and atexit (C28, §17.6);
 #   - pthread core:  create/join/detach/self/exit plus the emutls runtime
 #                    entry the TLS ABI calls through.
+#
+# ABI diff (shell dynamicization, C29 §18.2): the dynamic shell is a C-style
+# no_std PIE; it formats with printf and drives the VFS through the plain
+# POSIX surface, so the shell's real usage is added here:
+#   - formatted output: printf;
+#   - directory/name ops: mkdir/rmdir/unlink/chdir/getcwd;
+#   - directory iteration and metadata: opendir/readdir/closedir/stat/fstat;
+#   - size ops: ftruncate; mount control: mount/umount.
 {
     global:
         __librs_start_main;
@@ -39,6 +47,20 @@
         pthread_self;
         pthread_exit;
         __emutls_get_address;
+        printf;
+        mkdir;
+        rmdir;
+        unlink;
+        chdir;
+        getcwd;
+        opendir;
+        readdir;
+        closedir;
+        stat;
+        fstat;
+        ftruncate;
+        mount;
+        umount;
     local:
         *;
 };

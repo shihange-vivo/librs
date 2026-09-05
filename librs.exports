@@ -5,6 +5,11 @@
 # made local at link time. No Rust-mangled name may ever appear here, and any
 # addition or removal must go through a separate ABI diff review.
 #
+# `puts` and `memcmp` are the compiler-emitted dependencies: LLVM folds a
+# printf whose format is a plain constant string into puts, and lowers slice
+# comparisons into memcmp, so the shell's literal output lines and string
+# matching reference them even though the source only names printf.
+#
 # The first version covers the C29 vertical fixture's real usage plus the
 # Phase 1 smoke ABI categories (§8.2):
 #   - crt/runtime:   the dynamic entry, the pthread TCB hand-in and the
@@ -48,6 +53,8 @@
         pthread_exit;
         __emutls_get_address;
         printf;
+        puts;
+        memcmp;
         mkdir;
         rmdir;
         unlink;

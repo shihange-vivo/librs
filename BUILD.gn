@@ -77,15 +77,40 @@ blueos_dso("libc") {
   export_manifest = "librs.exports"
 }
 
-# C21 §10.1: the ARM32 Thumb dynamic-application start object. It is ARM
-# assembly, so it is only ever *linked* into dynamic apps on ARM boards (C29);
-# GN only builds it when a dynamic-app target references it, which no non-ARM
-# board does. C29 links it at the front of the dynamic app so `_start` is its
-# `e_entry`. The board `kernel_config` supplies the clang `--target`/Thumb
-# flags the assembler needs (`-mthumb -march=...`).
+# Phase-2 dynamic-application start object. Each architecture receives the
+# same `info` pointer in its first argument register and tail-calls
+# `__librs_start_main(main, info)` without depending on the kernel's GP/TLS
+# state. The board ABI config supplies the assembler target flags.
+config("blueos_scrt1_config") {
+  if (board == "qemu_riscv64") {
+    cflags = [
+      "-march=rv64imac",
+      "-mabi=lp64",
+    ]
+  } else if (board == "qemu_riscv32") {
+    cflags = [
+      "-march=rv32imc",
+      "-mabi=ilp32",
+    ]
+  }
+}
+
 static_library("blueos_scrt1") {
-  sources = [ "start/arm/blueos_scrt1.S" ]
-  configs += [ "//build/boards/${board}:kernel_config" ]
+  if (board == "qemu_mps2_an385" || board == "qemu_mps3_an547") {
+    sources = [ "start/arm/blueos_scrt1.S" ]
+  } else if (board == "qemu_riscv32" || board == "qemu_riscv64") {
+    sources = [ "start/riscv/blueos_scrt1.S" ]
+  } else if (board == "qemu_virt64_aarch64") {
+    sources = [ "start/aarch64/blueos_scrt1.S" ]
+  } else {
+    # Keep GN generation working for boards that do not enable dynamic apps;
+    # no target on those boards is allowed to depend on this archive yet.
+    sources = [ "start/arm/blueos_scrt1.S" ]
+  }
+  configs += [
+    "//build/boards/${board}:kernel_config",
+    ":blueos_scrt1_config",
+  ]
 }
 
 build_rust("librs_unittest_image") {

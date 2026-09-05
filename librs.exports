@@ -9,6 +9,9 @@
 # printf whose format is a plain constant string into puts, and lowers slice
 # comparisons into memcmp, so the shell's literal output lines and string
 # matching reference them even though the source only names printf.
+# `memcpy`/`memset` are the same category on RISC-V: LLVM lowers struct/array
+# copies and zeroing into libcalls there, so the RV64 shell imports them
+# dynamically even though Thumb codegen inlined them away.
 #
 # The first version covers the C29 vertical fixture's real usage plus the
 # Phase 1 smoke ABI categories (§8.2):
@@ -55,6 +58,8 @@
         printf;
         puts;
         memcmp;
+        memcpy;
+        memset;
         mkdir;
         rmdir;
         unlink;

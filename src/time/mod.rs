@@ -165,7 +165,7 @@ pub extern "C" fn difftime(time1: time_t, time0: time_t) -> c_double {
 pub extern "C" fn usleep(usec: c_uint) -> c_int {
     let rqtp = timespec {
         tv_sec: (usec / 1_000_000) as time_t,
-        tv_nsec: ((usec % 1_000_000) * 1000) as c_int,
+        tv_nsec: ((usec % 1_000_000) * 1000) as c_long,
     };
     let rmtp = core::ptr::null_mut();
     unsafe { nanosleep(&rqtp, rmtp) }
@@ -175,7 +175,7 @@ pub extern "C" fn usleep(usec: c_uint) -> c_int {
 pub extern "C" fn msleep(msec: c_uint) -> c_int {
     let rqtp = timespec {
         tv_sec: (msec / 1000) as time_t,
-        tv_nsec: ((msec % 1000) * 1_000_000) as c_int,
+        tv_nsec: ((msec % 1000) * 1_000_000) as c_long,
     };
     let rmtp = core::ptr::null_mut();
     unsafe { nanosleep(&rqtp, rmtp) }

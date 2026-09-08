@@ -75,6 +75,9 @@ blueos_dso("libc") {
     "//libc",
   ]
   export_manifest = "librs.exports"
+  if (board == "qemu_riscv32") {
+    deps += [ "//librs/atomic:atomic_dso" ]
+  }
 }
 
 # Phase-2 dynamic-application start object. Each architecture receives the

@@ -1,0 +1,32 @@
+# Copyright (c) 2026 vivo Mobile Communication Co., Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/boards/${board}.gni")
+
+# C35 §14.2: `__atomic_*` builtins for the no-A RV32 IMC DSO.
+#
+# `riscv32imc-vivo-blueos` declares `+m,+c` (no `+a`), so `target_has_atomic`
+# is false and rustc/LLVM lowers `core::sync::atomic` and `spin` into
+# `__atomic_*` library calls. The DSO must resolve them without referencing
+# kernel symbols, so this is a self-contained copy of the kernel's
+# compiler-rt `atomic.c` paired with a local M-mode IRQ shim (BlueOS runs the
+# DSO in M-mode, so it may clear/set `mstatus.MIE` itself). The lock-free
+# fast paths (pointer CAS on IMAC) still compile through; only the
+# non-lock-free fallbacks take the IRQ-disable path.
+static_library("atomic_dso") {
+  sources = [
+    "atomic.c",
+    "atomic_irq_shim.c",
+  ]
+}

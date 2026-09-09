@@ -23,12 +23,7 @@ use crate::sync::{
     rwlock::{Pshared, Rwlock as RsRwLock, RwlockAttr},
     waitval::Waitval,
 };
-use alloc::{
-    alloc::{alloc as system_alloc, dealloc as system_dealloc},
-    collections::btree_map::BTreeMap,
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{alloc::alloc as system_alloc, collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use blueos_header::{
     syscalls::NR::{CreateThread, ExitThread, GetSchedParam, GetTid, SchedYield, SetSchedParam},
     thread::{SpawnArgs, DEFAULT_STACK_SIZE, STACK_ALIGN},
@@ -119,24 +114,12 @@ fn remove_tcb(tid: pthread_t) {
 struct PosixRoutineInfo {
     pub entry: extern "C" fn(arg: *mut c_void) -> *mut c_void,
     pub arg: *mut c_void,
-    pub storage_start: *mut u8,
-    pub storage_size: usize,
 }
 
 extern "C" fn posix_start_routine(arg: *mut c_void) {
     let routine = unsafe { &*arg.cast::<PosixRoutineInfo>() };
     let retval = (routine.entry)(routine.arg);
     pthread_exit(retval);
-}
-
-// This routine will be executed on another stack by kernel.
-// The PosixRoutineInfo is stored between [storage_start, storage_start + storage_size),
-// that doesn't matter, after the `system_dealloc`, we don't use it anymore.
-extern "C" fn posix_cleanup_routine(arg: *mut c_void) {
-    assert_ne!(arg, core::ptr::null_mut());
-    let routine = unsafe { &*arg.cast::<PosixRoutineInfo>() };
-    let layout = Layout::from_size_align(routine.storage_size, STACK_ALIGN).unwrap();
-    unsafe { system_dealloc(routine.storage_start, layout) };
 }
 
 #[linkage = "weak"]
@@ -380,10 +363,7 @@ extern "C" fn register_posix_tcb(tid: usize, _spawn_args_ptr: *mut SpawnArgs) {
     register_posix_tcb_with_context(tid as usize, context);
 }
 
-fn register_posix_tcb_with_context(
-    tid: usize,
-    context: Option<Arc<LibcApplicationContext>>,
-) {
+fn register_posix_tcb_with_context(tid: usize, context: Option<Arc<LibcApplicationContext>>) {
     let tid: pthread_t = unsafe { core::mem::transmute(tid) };
     {
         let tcb = Arc::new(PthreadTcb {
@@ -427,19 +407,24 @@ pub extern "C" fn pthread_create(
     let posix_routine_info = unsafe { &mut *(posix_routine_info_ptr as *mut PosixRoutineInfo) };
     posix_routine_info.entry = start_routine;
     posix_routine_info.arg = arg;
-    posix_routine_info.storage_start = storage_start;
-    posix_routine_info.storage_size = storage_size;
     let mut spawn_args = SpawnArgs {
         spawn_hook: Some(register_posix_tcb),
         entry: posix_start_routine,
         arg: posix_routine_info_ptr,
-        cleanup: Some(posix_cleanup_routine),
+        // The allocation is owned by the kernel Thread and released after
+        // switching off it. A userspace cleanup here would execute from the
+        // scheduler's exception context and cannot safely issue FreeMem.
+        cleanup: None,
         stack_start: storage_start,
         stack_size,
+        stack_allocation_size: storage_size,
+        stack_allocation_align: STACK_ALIGN,
     };
     let tid = bk_syscall!(CreateThread, &mut spawn_args as *mut SpawnArgs) as pthread_t;
     if tid == !0 {
-        unsafe { system_dealloc(storage_start, layout) };
+        // With non-zero `stack_allocation_size`, ownership transferred to the
+        // kernel. It also releases the allocation if admission fails after
+        // the Thread was built.
         return -1;
     }
     unsafe { thread.write_volatile(tid) };

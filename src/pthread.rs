@@ -23,17 +23,17 @@ use crate::sync::{
     rwlock::{Pshared, Rwlock as RsRwLock, RwlockAttr},
     waitval::Waitval,
 };
-use alloc::{
-    alloc::{alloc as system_alloc, dealloc as system_dealloc},
-    collections::btree_map::BTreeMap,
-    sync::Arc,
-    vec::Vec,
-};
+#[cfg(not(armv7m))]
+use alloc::alloc::dealloc as system_dealloc;
+use alloc::{alloc::alloc as system_alloc, collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use blueos_header::{
     syscalls::NR::{CreateThread, ExitThread, GetSchedParam, GetTid, SchedYield, SetSchedParam},
     thread::{SpawnArgs, DEFAULT_STACK_SIZE, STACK_ALIGN},
 };
 use blueos_scal::bk_syscall;
+
+#[cfg(armv7m)]
+use crate::application_context::LibcApplicationContext;
 use core::{
     alloc::Layout,
     cell::SyncUnsafeCell,
@@ -89,6 +89,11 @@ struct PthreadTcb {
     cancel_enabled: AtomicBool,
     retval: SyncUnsafeCell<usize>,
     joint: Barrier,
+    // The owning application's runtime context. Inherited by
+    // every pthread created from this thread; `None` for threads that predate
+    // the dynamic entry (the static path has no application context).
+    #[cfg(armv7m)]
+    context: Option<Arc<LibcApplicationContext>>,
 }
 
 #[inline]
@@ -113,7 +118,9 @@ fn remove_tcb(tid: pthread_t) {
 struct PosixRoutineInfo {
     pub entry: extern "C" fn(arg: *mut c_void) -> *mut c_void,
     pub arg: *mut c_void,
+    #[cfg(not(armv7m))]
     pub storage_start: *mut u8,
+    #[cfg(not(armv7m))]
     pub storage_size: usize,
 }
 
@@ -123,9 +130,7 @@ extern "C" fn posix_start_routine(arg: *mut c_void) {
     pthread_exit(retval);
 }
 
-// This routine will be executed on another stack by kernel.
-// The PosixRoutineInfo is stored between [storage_start, storage_start + storage_size),
-// that doesn't matter, after the `system_dealloc`, we don't use it anymore.
+#[cfg(not(armv7m))]
 extern "C" fn posix_cleanup_routine(arg: *mut c_void) {
     assert_ne!(arg, core::ptr::null_mut());
     let routine = unsafe { &*arg.cast::<PosixRoutineInfo>() };
@@ -315,7 +320,74 @@ pub extern "C" fn register_my_posix_tcb() {
     register_posix_tcb(tid as usize, core::ptr::null_mut());
 }
 
+/// Register the calling thread's TCB and attach an application runtime context.
+/// Used by the dynamic entry to install the main thread's
+/// [`LibcApplicationContext`] before any constructor runs.
+/// cbindgen:ignore
+#[cfg(armv7m)]
+pub fn register_my_posix_tcb_with_context(context: Arc<LibcApplicationContext>) {
+    let tid = pthread_self();
+    register_posix_tcb_inner(tid as usize, Some(context));
+}
+
+/// The calling thread's application runtime context, if any.
+/// `None` for threads that predate the dynamic entry (the static path has no
+/// application context).
+#[inline]
+#[cfg(armv7m)]
+pub fn get_my_context() -> Option<Arc<LibcApplicationContext>> {
+    get_my_tcb().and_then(|tcb| tcb.context.clone())
+}
+
+/// Run the calling thread's pthread-key destructors (which includes the emutls
+/// key destructor) and remove its TCB, without the joinable/detached bookkeeping
+/// or the terminal `ExitThread`. Used by the dynamic entry's main-thread teardown
+///, which performs `ApplicationFinishExit` + `ExitThread` itself.
+/// cbindgen:ignore
+#[cfg(armv7m)]
+pub fn cleanup_my_tcb() {
+    let tid = pthread_self();
+    let Some(tcb) = get_tcb(tid) else {
+        return;
+    };
+    {
+        let read_tcb_kv = tcb.kv.read();
+        // Collect dtors and vals first: a dtor may write KEYS while we iterate.
+        let mut dtors = Vec::new();
+        let mut vals = Vec::new();
+        for (key, val) in read_tcb_kv.iter() {
+            let keys = KEYS.read();
+            if let Some(dtor) = keys.get(key) {
+                let ptr: *mut c_void = *val as *mut c_void;
+                if let Some(f) = dtor.0.as_ref() {
+                    dtors.push(*f);
+                    vals.push((*key, ptr));
+                }
+            }
+        }
+        drop(read_tcb_kv);
+        for i in 0..dtors.len() {
+            dtors[i](vals[i].1);
+        }
+    }
+    remove_tcb(tid);
+}
+
 extern "C" fn register_posix_tcb(tid: usize, _spawn_args_ptr: *mut SpawnArgs) {
+    // Inherit the creating thread's application context. The
+    // `spawn_hook` runs synchronously in the creator's context (the kernel
+    // calls it inline inside `create_thread` before the new thread is queued),
+    // so `pthread_self()` still names the creator here.
+    #[cfg(armv7m)]
+    register_posix_tcb_inner(tid, get_my_context());
+    #[cfg(not(armv7m))]
+    register_posix_tcb_inner(tid);
+}
+
+fn register_posix_tcb_inner(
+    tid: usize,
+    #[cfg(armv7m)] context: Option<Arc<LibcApplicationContext>>,
+) {
     let tid: pthread_t = unsafe { core::mem::transmute(tid) };
     {
         let tcb = Arc::new(PthreadTcb {
@@ -324,6 +396,8 @@ extern "C" fn register_posix_tcb(tid: usize, _spawn_args_ptr: *mut SpawnArgs) {
             detached: AtomicI8::new(0),
             retval: SyncUnsafeCell::new(0),
             joint: Barrier::new(unsafe { NonZero::new(2).unwrap_unchecked() }),
+            #[cfg(armv7m)]
+            context,
         });
         let mut write = TCBS.write();
         let ret = write.insert(tid, tcb);
@@ -358,19 +432,38 @@ pub extern "C" fn pthread_create(
     let posix_routine_info = unsafe { &mut *(posix_routine_info_ptr as *mut PosixRoutineInfo) };
     posix_routine_info.entry = start_routine;
     posix_routine_info.arg = arg;
-    posix_routine_info.storage_start = storage_start;
-    posix_routine_info.storage_size = storage_size;
+    #[cfg(not(armv7m))]
+    {
+        posix_routine_info.storage_start = storage_start;
+        posix_routine_info.storage_size = storage_size;
+    }
     let mut spawn_args = SpawnArgs {
         spawn_hook: Some(register_posix_tcb),
         entry: posix_start_routine,
         arg: posix_routine_info_ptr,
+        // The allocation is owned by the kernel Thread and released after
+        // switching off it. A userspace cleanup here would execute from the
+        // scheduler's exception context and cannot safely issue FreeMem.
+        #[cfg(armv7m)]
+        cleanup: None,
+        #[cfg(not(armv7m))]
         cleanup: Some(posix_cleanup_routine),
         stack_start: storage_start,
         stack_size,
+        #[cfg(armv7m)]
+        stack_allocation_size: storage_size,
+        #[cfg(armv7m)]
+        stack_allocation_align: STACK_ALIGN,
     };
     let tid = bk_syscall!(CreateThread, &mut spawn_args as *mut SpawnArgs) as pthread_t;
     if tid == !0 {
-        unsafe { system_dealloc(storage_start, layout) };
+        // With non-zero `stack_allocation_size`, ownership transferred to the
+        // kernel. It also releases the allocation if admission fails after
+        // the Thread was built.
+        #[cfg(not(armv7m))]
+        unsafe {
+            system_dealloc(storage_start, layout)
+        };
         return -1;
     }
     unsafe { thread.write_volatile(tid) };

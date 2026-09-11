@@ -15,12 +15,10 @@
 // POSIX syncs/TCB implementations for the newlib_mps3_an547 target.
 // All types ABI consistency with newlib.
 
+#[cfg(not(armv7m))]
+use alloc::alloc::dealloc as system_dealloc;
 use alloc::{
-    alloc::{alloc as system_alloc, dealloc as system_dealloc},
-    boxed::Box,
-    collections::btree_map::BTreeMap,
-    sync::Arc,
-    vec::Vec,
+    alloc::alloc as system_alloc, boxed::Box, collections::btree_map::BTreeMap, sync::Arc, vec::Vec,
 };
 use blueos_header::{
     syscalls::NR::{AtomicWait, AtomicWake, CreateThread, ExitThread, GetTid},
@@ -631,7 +629,9 @@ fn remove_tcb(tid: pthread_t) {
 struct PosixRoutineInfo {
     pub entry: extern "C" fn(arg: *mut c_void) -> *mut c_void,
     pub arg: *mut c_void,
+    #[cfg(not(armv7m))]
     pub storage_start: *mut u8,
+    #[cfg(not(armv7m))]
     pub storage_size: usize,
 }
 
@@ -641,6 +641,7 @@ extern "C" fn posix_start_routine(arg: *mut c_void) {
     pthread_exit(retval);
 }
 
+#[cfg(not(armv7m))]
 extern "C" fn posix_cleanup_routine(arg: *mut c_void) {
     assert_ne!(arg, core::ptr::null_mut());
     let routine = unsafe { &*arg.cast::<PosixRoutineInfo>() };
@@ -759,19 +760,32 @@ pub extern "C" fn pthread_create(
     let posix_routine_info = unsafe { &mut *(posix_routine_info_ptr as *mut PosixRoutineInfo) };
     posix_routine_info.entry = start_routine;
     posix_routine_info.arg = arg;
-    posix_routine_info.storage_start = storage_start;
-    posix_routine_info.storage_size = storage_size;
+    #[cfg(not(armv7m))]
+    {
+        posix_routine_info.storage_start = storage_start;
+        posix_routine_info.storage_size = storage_size;
+    }
     let mut spawn_args = SpawnArgs {
         spawn_hook: Some(register_posix_tcb),
         entry: posix_start_routine,
         arg: posix_routine_info_ptr,
+        #[cfg(armv7m)]
+        cleanup: None,
+        #[cfg(not(armv7m))]
         cleanup: Some(posix_cleanup_routine),
         stack_start: storage_start,
         stack_size,
+        #[cfg(armv7m)]
+        stack_allocation_size: storage_size,
+        #[cfg(armv7m)]
+        stack_allocation_align: STACK_ALIGN,
     };
     let tid = bk_syscall!(CreateThread, &mut spawn_args as *mut SpawnArgs) as pthread_t;
     if tid == !0 {
-        unsafe { system_dealloc(storage_start, layout) };
+        #[cfg(not(armv7m))]
+        unsafe {
+            system_dealloc(storage_start, layout)
+        };
         return -1;
     }
     unsafe { thread.write_volatile(tid) };
